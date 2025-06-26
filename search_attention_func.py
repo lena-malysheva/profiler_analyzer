@@ -1,13 +1,31 @@
 import json
 
-def find_python_func(event, all_events): # ищем перую питоновскую функцию
+def find_cpu_op(gpu_op, all_events):
+    ts_start = gpu_op["ts"]
+    ts_end = ts_start + gpu_op.get("dur", 0)
+
+    args = gpu_op.get("args", {})
+    external_id_gpu = args.get("External id")
+    for e in all_events:
+        ts = e.get("ts")
+        te = ts + e.get("dur", 0)
+
+        args_cpu = e.get("args", {})
+        external_id_cpu = args_cpu.get("External id")
+
+        if not external_id_cpu or external_id_gpu != external_id_cpu:
+            continue
+        
+        return e
+
+def find_python_candidates(event, all_events): # ищем питоновские функции
     ts_start = event["ts"]
     ts_end = ts_start + event.get("dur", 0)
 
     candidates = []
     for e in all_events:
-        ts = event.get("ts")
-        te = ts + event.get("dur", 0)
+        ts = e.get("ts")
+        te = ts + e.get("dur", 0)
         cat = e.get("cat", "").lower()
         
         # if ts_start < ts or te < ts_end:
@@ -21,50 +39,7 @@ def find_python_func(event, all_events): # ищем перую питоновс�
     
     if not candidates:
         return None
-    return max(candidates, key=lambda e: e["ts"])
-
-
-
-def find_python_parent_and_kernel(event, all_events):
-    args = event.get("args", {})
-    parent_id = args.get("Python parent id")
-
-    if parent_id is None:
-        return None
-
-    # ищем родительское Python-событие
-    parent_event = None
-
-    for e in all_events:
-        args2 = e.get("args", {})
-        id = args2.get("Python id")
-        if not id:
-            continue
-        if id == parent_id:
-            parent_event = e
-            break
-
-    if parent_event is None:
-        return None
-
-    parent_ts = parent_event.get("ts")
-    parent_dur = parent_event.get("dur", 0)
-    parent_end = parent_ts + parent_dur if parent_ts is not None else None
-
-    # attention-событие
-    for e in all_events:
-        name = e.get("name", "").lower()
-        ts = e.get("ts")
-        dur = e.get("dur", 0)
-
-        if "attention" not in name:
-            continue
-        if ts is None or parent_ts is None or parent_end is None:
-            continue
-        if parent_ts <= ts <= parent_end and ts + dur <= parent_end:
-            return e
-
-    return None
+    return candidates
 
 
 with open("trace_llama_13b.json", "r") as f:
@@ -108,14 +83,64 @@ for event in events:
 print(f"\nНайдено {len(gpu_ops)} GPU-операций внутри decorate_context.\n")
 i = 0
 
-kernel_event = None
+python_ops_with_attention = []
+time_gpu_op = []
 
-# ищем функции с kernel
+# ищем функции с attention
 for gpu_op in gpu_ops:
-    first_python_event = find_python_func(gpu_op, events)
-    if first_python_event != None:
-        kernel_event = find_python_parent_and_kernel(first_python_event, events)
+    cpu_op = find_cpu_op(gpu_op, events) # ищем cpu op
+    if not cpu_op:
+        continue
 
-    if kernel_event != None:
-        print(i)
+    candidates = find_python_candidates(cpu_op, events)
+    candidates_with_attention = []
 
+    for candidat in candidates: # ищем кандидатов с attention
+        name_candidat = candidat.get("name", "").lower()
+
+        if "attention" not in name_candidat:
+            continue
+
+        candidates_with_attention.append(candidat)
+    
+    if not candidates_with_attention:
+        continue
+
+    candidat_with_attention = max(candidates_with_attention, key=lambda e: e["ts"]) # выбираем с наибольшим временем
+
+    if len(python_ops_with_attention) == 0: # если первый кандидат, запоминаем время начала и конца
+        ts_gpu_op = candidat_with_attention["ts"]
+        te_gpu_op = ts + candidat_with_attention.get("dur", 0)
+        python_ops_with_attention.append(candidat_with_attention)
+        continue
+    
+    flag = False
+    args_candidat = candidat_with_attention.get("args", {})
+    id_candidat = args_candidat.get("Python id")
+
+    for python_op in python_ops_with_attention:
+        
+        args_python_op = python_op.get("args", {})
+        id_python_op = args_python_op.get("Python id")
+
+        if id_python_op == id_candidat: # если та же операция
+            flag = True
+            break
+
+    ts_new = candidat_with_attention["ts"]
+    te_new = ts_new + candidat_with_attention.get("dur", 0)
+
+    if flag: # если у нас уже была эта операция, тогда запоминаем новое время окончания
+        te_gpu_op = te_new
+
+
+    else: # если новая, запоминаем новые времена и добавляем кандидата
+        time_gpu_op.append([ts_gpu_op, te_gpu_op]) 
+
+        ts_gpu_op = ts_new
+        te_gpu_op = te_new
+
+        python_ops_with_attention.append(candidat_with_attention)
+
+
+print(len(python_ops_with_attention))
