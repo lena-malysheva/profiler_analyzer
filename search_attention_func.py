@@ -1,5 +1,5 @@
 import json
-import time
+import argparse
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
@@ -42,21 +42,20 @@ class Callstack:
             parent_id = current_stack[-1].frame_id if len(current_stack) else None # последний фрейм из 
 
             frame = Frame(
-                name = e.get("name", ""),
-                parent = parent_id,
-                frame_id = frame_id, 
-                begin = ts,
-                end = te
+                name=e.get("name", ""),
+                parent=parent_id,
+                frame_id=frame_id,
+                begin=ts,
+                end=te
             )
-            
+
             self.bottom_up_stack[frame_id] = frame
 
-            #  сравнение по correlation_id
             correlation_id = e.get("args", {}).get("correlation")
             if correlation_id is not None:
                 self.cuda_reference[correlation_id] = frame_id
             frame_id += 1
-            current_stack.append(frame) 
+            current_stack.append(frame)
 
 def build_external_id_index(events):
     index = {}
@@ -74,23 +73,15 @@ def collect_durations_for_section(section_name: str, events: list[dict]) -> list
     ]
 
     callstack = Callstack()
-
-    start_time_callstack = time.time()
     callstack.build_callStack(python_events, external_id_index)
-    end_time_callstack = time.time()  
-    elapsed_time = end_time_callstack - start_time_callstack
-    print(f"\n Время построения callstack {int(elapsed_time // 60)} мин {int(elapsed_time % 60)} сек \n")
 
-    # ищем все gpu операции
     gpu_ops = [
         e for e in events
         if isinstance(e, dict) and
         any(cat in e.get("cat", "").lower() for cat in ["gpu", "kernel"])
     ]
 
-    print(f"\n Найдено {len(gpu_ops)} GPU-операций.\n")
-    i = 0
-
+    print(f"\nНайдено {len(gpu_ops)} GPU-операций.\n")
     durations: List[int] = []
     visited_frames = set()
 
@@ -104,39 +95,32 @@ def collect_durations_for_section(section_name: str, events: list[dict]) -> list
         if not frames:
             continue
 
-        for frame in reversed(frames):  # от корня к leaf
+        for frame in reversed(frames):
             if section_name in frame.name.lower():
                 frame_id = (frame.begin, frame.end)
                 if frame_id not in visited_frames:
                     visited_frames.add(frame_id)
                     durations.append(int(frame.end - frame.begin))
-                break  # не проверяем выше по стеку
+                break
 
     return durations
 
-start_time_json = time.time()
+def main():
+    parser = argparse.ArgumentParser(description="Analyze GPU durations for a specific section")
+    parser.add_argument("--path", type=str, required=True, help="Path to JSON trace file")
+    parser.add_argument("--section", type=str, required=True, help="Section name to search for")
+    args = parser.parse_args()
 
-with open("/home/elena/profiler_analyzer/1750931917.2844696-TP-7.trace.json", "r") as f:
-    data = json.load(f)
+    with open(args.path, "r") as f:
+        data = json.load(f)
 
-end_time_json = time.time()  
-elapsed_time = end_time_json - start_time_json
+    events = data.get("traceEvents", [])
+    duration_gpu_op = collect_durations_for_section(args.section.lower(), events)
 
-print(f"\n Время чтения json {int(elapsed_time // 60)} мин {int(elapsed_time % 60)} сек \n")
+    print(f"Найдено {len(duration_gpu_op)} операций\n")
+    print("Интервалы выполнения GPU блоков:")
+    for i, duration in enumerate(duration_gpu_op):
+        print(f"Блок {i+1}: {duration}")
 
-events = data.get("traceEvents", [])
-
-section_name = "deepseekv2attentionmla"
-
-start_time_json = time.time()
-duration_gpu_op = collect_durations_for_section(section_name, events)
-end_time_json = time.time()  
-elapsed_time = end_time_json - start_time_json
-
-print(f"\n Время поиска {section_name} :  {int(elapsed_time // 60)} мин {int(elapsed_time % 60)} сек \n")
-    
-print(f"Найдено {len(duration_gpu_op)} операций")
-
-print("\nИнтервалы выполнения GPU блоков:")
-for i, duration in enumerate(duration_gpu_op):
-    print(f"Блок {i+1}: {duration} ")
+if __name__ == "__main__":
+    main()
